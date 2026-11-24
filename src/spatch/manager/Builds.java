@@ -11,22 +11,21 @@ import org.json.JSONObject;
  * done across its jobs; a job that hasn't started counts as none, a finished or skipped one as all.
  */
 final class Builds {
-    private static final String RUNS = "https://api.github.com/repos/" + Releases.REPO + "/actions/workflows/nightly.yml/runs?per_page=1&branch=";
+    private static final String RUNS = "https://api.github.com/repos/" + Releases.PATCHES_REPO + "/actions/workflows/nightly.yml/runs?per_page=1&branch=";
 
     static final class Run {
         final String title, commit, url, step;
-        final boolean active, failed;
+        final boolean active;
         final float progress;
         final long started; // epoch millis, 0 when unknown
         long typical; // how long the last successful build took, 0 when unknown
 
-        Run(String title, String commit, String url, String step, boolean active, boolean failed, float progress, long started) {
+        Run(String title, String commit, String url, String step, boolean active, float progress, long started) {
             this.title = title;
             this.commit = commit;
             this.url = url;
             this.step = step;
             this.active = active;
-            this.failed = failed;
             this.progress = progress;
             this.started = started;
         }
@@ -79,7 +78,7 @@ final class Builds {
                 }
             }
             Run out = new Run(run.optString("display_title", "Nightly"), sha.length() >= 7 ? sha.substring(0, 7) : sha,
-                run.optString("html_url", Releases.PAGE), step, active, failed, progress, time(run.optString("run_started_at", "")));
+                run.optString("html_url", Releases.PAGE), step, active, progress, time(run.optString("run_started_at", "")));
             out.typical = Math.max(0, typical);
             return out;
         } catch (JSONException e) {
@@ -89,10 +88,8 @@ final class Builds {
 
     private static long time(String iso) {
         try {
-            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
-            f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
-            return f.parse(iso).getTime();
-        } catch (java.text.ParseException e) {
+            return java.time.Instant.parse(iso).toEpochMilli();
+        } catch (Exception e) {
             return 0;
         }
     }

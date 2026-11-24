@@ -249,9 +249,7 @@ final class Bundle implements AutoCloseable {
     }
 
     private static byte[] fetch(String url) throws IOException {
-        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-        c.setConnectTimeout(15000);
-        c.setReadTimeout(20000);
+        java.net.HttpURLConnection c = Releases.open(url, null);
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             copy(in, out);
@@ -264,11 +262,12 @@ final class Bundle implements AutoCloseable {
     /** Raw bsdiff patch as written by the bsdiff crate: (mix, copy, seek) headers, mix added to old. */
     static byte[] bspatch(byte[] old, byte[] patch) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream(old.length + patch.length);
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(patch).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         long oldPos = 0;
         int p = 0;
         while (p < patch.length) {
             if (patch.length - p < 24) throw new IOException("Truncated patch.");
-            long mix = le64(patch, p), copy = le64(patch, p + 8), seek = le64(patch, p + 16);
+            long mix = buf.getLong(p), copy = buf.getLong(p + 8), seek = buf.getLong(p + 16);
             if (seek < 0) seek = -(seek & Long.MAX_VALUE);
             p += 24;
             if (mix < 0 || copy < 0 || mix + copy > patch.length - p || oldPos + mix > old.length) throw new IOException("Corrupt patch.");
@@ -282,12 +281,6 @@ final class Bundle implements AutoCloseable {
             if (oldPos < 0 || oldPos > old.length) throw new IOException("Corrupt patch.");
         }
         return out.toByteArray();
-    }
-
-    private static long le64(byte[] b, int at) {
-        long v = 0;
-        for (int i = 7; i >= 0; i--) v = v << 8 | (b[at + i] & 0xff);
-        return v;
     }
 
     private static void put(ZipOutputStream out, String name, int method, byte[] bytes) throws IOException {

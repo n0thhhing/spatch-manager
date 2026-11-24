@@ -20,8 +20,9 @@ import org.json.JSONObject;
  * builds manager-v<version>. The newest published release of each kind wins.
  */
 final class Releases {
-    static final String REPO = "n0thhhing/spatch";
-    static final String PAGE = "https://github.com/" + REPO + "/releases";
+    static final String PATCHES_REPO = "n0thhhing/spatch";
+    static final String MANAGER_REPO = "n0thhhing/spatch-manager";
+    static final String PAGE = "https://github.com/" + PATCHES_REPO + "/releases";
 
     /** A release's tag, the download URL of its asset, and its release notes. */
     static final class Release {
@@ -59,29 +60,30 @@ final class Releases {
         return wantNightly && nightly != null ? nightly : bundle;
     }
 
-    /** The manager to update to: the nightly when asked for and published, the newest release otherwise. */
-    Release manager(boolean wantNightly) {
-        return wantNightly && nightlyManager != null ? nightlyManager : manager;
-    }
-
-    static Releases fetch() throws IOException {
-        return fetch("");
-    }
-
     /** With a branch, its nightly and commits stand in for main's; "" is main. */
     static Releases fetch(String branch) throws IOException {
-        String releasesJson = get("https://api.github.com/repos/" + REPO + "/releases?per_page=50");
+        String releasesJson = get("https://api.github.com/repos/" + PATCHES_REPO + "/releases?per_page=50");
         String commitsJson = null;
         try {
-            commitsJson = get("https://api.github.com/repos/" + REPO + "/commits?per_page=15" + (branch.isEmpty() ? "" : "&sha=" + java.net.URLEncoder.encode(branch, "UTF-8")));
+            commitsJson = get("https://api.github.com/repos/" + PATCHES_REPO + "/commits?per_page=15" + (branch.isEmpty() ? "" : "&sha=" + java.net.URLEncoder.encode(branch, "UTF-8")));
         } catch (IOException ignored) {
             // Release notes still show when the commit log cannot be fetched.
         }
-        return parse(releasesJson, commitsJson, branch);
-    }
-
-    static Releases parse(String releasesJson, String commitsJson) throws IOException {
-        return parse(releasesJson, commitsJson, "");
+        String managerReleasesJson = null;
+        try {
+            managerReleasesJson = get("https://api.github.com/repos/" + MANAGER_REPO + "/releases?per_page=50");
+        } catch (IOException ignored) {
+            // Patch releases still show when manager releases cannot be fetched.
+        }
+        Releases r = parse(releasesJson, commitsJson, branch);
+        if (managerReleasesJson != null && !managerReleasesJson.isEmpty()) {
+            try {
+                parseManager(r, managerReleasesJson);
+            } catch (JSONException ignored) {
+                // Ignore malformed manager release metadata; patch releases remain usable.
+            }
+        }
+        return r;
     }
 
     /** Last good reply per URL: {etag, body}. */
@@ -103,14 +105,10 @@ final class Releases {
      */
     static String get(String url) throws IOException {
         String[] cached = CACHE.get(url);
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection c = connect(url, "application/vnd.github+json");
         try {
-            c.setRequestProperty("Accept", "application/vnd.github+json");
-            c.setRequestProperty("User-Agent", "SpatchManager");
             if (token != null) c.setRequestProperty("Authorization", "Bearer " + token);
             if (cached != null) c.setRequestProperty("If-None-Match", cached[0]);
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(30000);
             int code = c.getResponseCode();
             if (code == 304 && cached != null) return cached[1];
             if (code == 401) {
@@ -311,17 +309,45 @@ final class Releases {
         }
     }
 
-    private static HttpURLConnection open(String url, String accept) throws IOException {
+    static HttpURLConnection connect(String url, String accept) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setRequestProperty("Accept", accept);
+        if (accept != null) c.setRequestProperty("Accept", accept);
+        c.setRequestProperty("User-Agent", "SpatchManager");
         c.setConnectTimeout(15000);
         c.setReadTimeout(30000);
-        c.setRequestProperty("User-Agent", "SpatchManager");
+        return c;
+    }
+
+    static HttpURLConnection open(String url, String accept) throws IOException {
+        HttpURLConnection c = connect(url, accept);
         if (c.getResponseCode() / 100 != 2) {
             int code = c.getResponseCode();
             c.disconnect();
             throw new IOException("GitHub answered " + code + ".");
         }
         return c;
+    }
+
+    private static void parseManager(Releases r, String managerReleasesJson) throws JSONException {
+        JSONArray list = new JSONArray(managerReleasesJson);
+        for (int i = 0; i < list.length(); i++) {
+            JSONObject release = list.getJSONObject(i);
+            if (release.optBoolean("draft")) continue;
+            String tag = release.getString("tag_name");
+            String body = cleanBody(release.optString("body", ""));
+            if (tag.equals("nightly-manager") && release.optBoolean("prerelease")) {
+                String commit = release.optString("target_commitish", "");
+                String mgr = asset(release, "spatch-manager.apk");
+                if (commit.length() >= 7 && mgr != null && r.nightlyManager == null) {
+                    r.nightlyManager = new Release(nightlyIdentity(release, "spatch-manager.apk", commit), mgr, body);
+                }
+                continue;
+            }
+            if (release.optBoolean("prerelease")) continue;
+            if (r.manager == null && tag.startsWith("manager-v")) {
+                String mgr = asset(release, "spatch-manager.apk");
+                if (mgr != null) r.manager = new Release(tag, mgr, body);
+            }
+        }
     }
 }

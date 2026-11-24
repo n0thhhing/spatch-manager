@@ -134,50 +134,30 @@ public final class MainActivity extends Activity {
     }
 
     private void editToken() {
-        EditText field = new EditText(this);
-        field.setSingleLine(true);
-        field.setHint("ghp_… or github_pat_…");
-        field.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         String current = prefs.getString(TOKEN, null);
-        android.content.ClipboardManager clips = getSystemService(android.content.ClipboardManager.class);
-        android.content.ClipData clip = clips == null ? null : clips.getPrimaryClip();
-        CharSequence pasted = clip != null && clip.getItemCount() > 0 ? clip.getItemAt(0).getText() : null;
-        if (current != null && !current.isEmpty()) {
-            field.setText(current);
-        } else if (pasted != null) {
-            String p = pasted.toString().trim();
-            if (p.startsWith("ghp_") || p.startsWith("github_pat_")) field.setText(p);
-        }
-        LinearLayout box = new LinearLayout(this);
-        box.setPadding(look.dp(24), look.dp(8), look.dp(24), 0);
-        box.addView(field, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("GitHub personal access token")
-            .setMessage("GitHub limits anonymous requests to 60/hour per IP. Adding a token (classic or fine-grained with public repo read) raises the limit to 5,000/hour.")
-            .setView(box).setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", (d, w) -> {
-                String val = field.getText().toString().trim();
+        String pasted = clipboardText();
+        String initial = current != null && !current.isEmpty() ? current
+            : pasted != null && (pasted.startsWith("ghp_") || pasted.startsWith("github_pat_")) ? pasted : null;
+        Runnable remove = () -> {
+            prefs.edit().remove(TOKEN).apply();
+            Releases.setToken(null);
+            say("GitHub token removed.");
+            if (tokenButton != null) Look.label(tokenButton, tokenLabel());
+            checkUpdates();
+        };
+        prompt("GitHub personal access token",
+            "GitHub limits anonymous requests to 60/hour per IP. Adding a token (classic or fine-grained with public repo read) raises the limit to 5,000/hour.",
+            "ghp_… or github_pat_…", true, initial, "Save", val -> {
                 if (val.isEmpty()) {
-                    prefs.edit().remove(TOKEN).apply();
-                    Releases.setToken(null);
-                    say("GitHub token removed.");
+                    remove.run();
                 } else {
                     prefs.edit().putString(TOKEN, val).apply();
                     Releases.setToken(val);
                     say("GitHub token saved. Rate limit is now 5,000 requests/hour.");
+                    if (tokenButton != null) Look.label(tokenButton, tokenLabel());
+                    checkUpdates();
                 }
-                if (tokenButton != null) Look.label(tokenButton, tokenLabel());
-                checkUpdates();
-            });
-        if (current != null && !current.isEmpty()) {
-            dialog.setNeutralButton("Remove", (d, w) -> {
-                prefs.edit().remove(TOKEN).apply();
-                Releases.setToken(null);
-                say("GitHub token removed.");
-                if (tokenButton != null) Look.label(tokenButton, tokenLabel());
-                checkUpdates();
-            });
-        }
-        dialog.show();
+            }, current != null && !current.isEmpty() ? remove : null);
     }
 
     private final BroadcastReceiver installResult = new BroadcastReceiver() {
@@ -246,7 +226,6 @@ public final class MainActivity extends Activity {
         look = new Look(this);
         getWindow().getDecorView().setBackgroundColor(look.surface);
         getWindow().setStatusBarColor(look.surface);
-        getWindow().setNavigationBarColor(look.surface);
         if (!look.dark) getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         setContentView(layout());
         autoUpdate = getIntent().getBooleanExtra(UPDATE, false);
@@ -1332,35 +1311,24 @@ public final class MainActivity extends Activity {
 
     /** Paste, replace or remove the invite; the clipboard's is offered when it holds one. */
     private void editInvite() {
-        EditText field = new EditText(this);
-        field.setSingleLine(true);
-        field.setHint("https://…/index.json#name.code");
         String current = prefs.getString(INVITE, null);
-        android.content.ClipboardManager clips = getSystemService(android.content.ClipboardManager.class);
-        android.content.ClipData clip = clips == null ? null : clips.getPrimaryClip();
-        CharSequence pasted = clip != null && clip.getItemCount() > 0 ? clip.getItemAt(0).getText() : null;
-        field.setText(current != null ? current : pasted != null && Sources.parse(pasted.toString()) != null ? pasted : "");
-        LinearLayout box = new LinearLayout(this);
-        box.setPadding(look.dp(24), look.dp(8), look.dp(24), 0);
-        box.addView(field, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("Invite to a Spatch source")
-            .setMessage("Whoever runs the source gives you this link. With it, Install Spatch downloads Spotify for you.")
-            .setView(box).setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", (d, w) -> {
-                if (Sources.parse(field.getText().toString()) == null) {
+        String pasted = clipboardText();
+        String initial = current != null ? current : pasted != null && Sources.parse(pasted) != null ? pasted : null;
+        prompt("Invite to a Spatch source",
+            "Whoever runs the source gives you this link. With it, Install Spatch downloads Spotify for you.",
+            "https://…/index.json#name.code", false, initial, "Save", val -> {
+                if (Sources.parse(val) == null) {
                     say("That isn't an invite link. It looks like https://…/index.json#name.code.");
                     return;
                 }
-                prefs.edit().putString(INVITE, field.getText().toString().trim()).apply();
+                prefs.edit().putString(INVITE, val).apply();
                 say("Invite saved. Install Spatch downloads Spotify from " + invite().host() + " when it needs to.");
                 refresh();
+            }, current == null ? null : () -> {
+                prefs.edit().remove(INVITE).apply();
+                say("Invite removed.");
+                refresh();
             });
-        if (current != null) dialog.setNeutralButton("Remove", (d, w) -> {
-            prefs.edit().remove(INVITE).apply();
-            say("Invite removed.");
-            refresh();
-        });
-        dialog.show();
     }
 
     /** Our own Spatch of the same Spotify version is installed, so its splits (never patched) can stay. */
@@ -1481,22 +1449,35 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private interface Password {
-        void accept(char[] password);
+    private void password(String title, String action, java.util.function.Consumer<char[]> then) {
+        prompt(title, null, null, true, null, action, val -> {
+            if (val.isEmpty()) say("A password is needed.");
+            else then.accept(val.toCharArray());
+        }, null);
     }
 
-    private void password(String title, String action, Password then) {
+    private String clipboardText() {
+        android.content.ClipboardManager clips = getSystemService(android.content.ClipboardManager.class);
+        android.content.ClipData clip = clips == null ? null : clips.getPrimaryClip();
+        CharSequence text = clip != null && clip.getItemCount() > 0 ? clip.getItemAt(0).getText() : null;
+        return text == null ? null : text.toString().trim();
+    }
+
+    private void prompt(String title, String message, String hint, boolean secret, String initial,
+            String action, java.util.function.Consumer<String> onOk, Runnable onRemove) {
         EditText field = new EditText(this);
-        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        field.setSingleLine(true);
+        if (hint != null) field.setHint(hint);
+        if (secret) field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        if (initial != null) field.setText(initial);
         LinearLayout box = new LinearLayout(this);
         box.setPadding(look.dp(24), look.dp(8), look.dp(24), 0);
         box.addView(field, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        new AlertDialog.Builder(this).setTitle(title).setView(box).setNegativeButton("Cancel", null)
-            .setPositiveButton(action, (d, w) -> {
-                if (field.length() == 0) say("A password is needed.");
-                else then.accept(field.getText().toString().toCharArray());
-            })
-            .show();
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle(title).setView(box).setNegativeButton("Cancel", null)
+            .setPositiveButton(action, (d, w) -> onOk.accept(secret && message == null ? field.getText().toString() : field.getText().toString().trim()));
+        if (message != null) dialog.setMessage(message);
+        if (onRemove != null) dialog.setNeutralButton("Remove", (d, w) -> onRemove.run());
+        dialog.show();
     }
 
     private PackageInfo spotify() {

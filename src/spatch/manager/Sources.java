@@ -48,13 +48,12 @@ final class Sources {
 
     /** One APKM the index offers. */
     static final class Entry {
-        final long versionCode, size;
+        final long size;
         final String sha256;
         final int minSdk;
         final List<String> abis = new ArrayList<>(), urls = new ArrayList<>();
 
-        Entry(long versionCode, String sha256, long size, int minSdk) {
-            this.versionCode = versionCode;
+        Entry(String sha256, long size, int minSdk) {
             this.sha256 = sha256;
             this.size = size;
             this.minSdk = minSdk;
@@ -118,7 +117,7 @@ final class Sources {
             if (!sha256.equals(s.getString("sha256")) || s.getLong("versionCode") != versionCode) continue;
             long size = s.getLong("size");
             if (size <= 0 || size > MAX_APKM) throw new JSONException("size " + size);
-            Entry e = new Entry(versionCode, sha256, size, s.getInt("minSdk"));
+            Entry e = new Entry(sha256, size, s.getInt("minSdk"));
             JSONArray abis = s.getJSONArray("abis"), urls = s.getJSONArray("urls");
             for (int j = 0; j < abis.length(); j++) e.abis.add(abis.getString(j));
             for (int j = 0; j < urls.length(); j++) e.urls.add(urls.getString(j));

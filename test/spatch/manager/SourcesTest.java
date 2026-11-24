@@ -90,10 +90,6 @@ public final class SourcesTest {
             check(cleaned.contains("• Clone support") && cleaned.contains("• Fix MiniArt") && !cleaned.contains("`") && !cleaned.contains("**"), "release markdown is cleaned for display");
             check(Releases.summary(cleaned).equals("New in 0.9.1"), "summary extracts the first line");
             check(Releases.version(new Releases.Release("nightly-5cf42ba", "u", "")).equals("nightly 5cf42ba") && Releases.code(new Releases.Release("manager-v0.9.1", "u", "")) == 901, "release version and manager code");
-            Releases rels = new Releases();
-            rels.manager = new Releases.Release("manager-v0.9.0", "u1", "");
-            rels.nightlyManager = new Releases.Release("nightly-3f91c05", "u2", "");
-            check(rels.manager(false) == rels.manager && rels.manager(true) == rels.nightlyManager, "manager(wantNightly) selects stable or nightly manager");
         } finally {
             server.stop(0);
         }
@@ -122,7 +118,7 @@ public final class SourcesTest {
     }
 
     private static Sources.Entry entry(String kind) {
-        Sources.Entry e = new Sources.Entry(148115007L, sha, APKM.length, 29);
+        Sources.Entry e = new Sources.Entry(sha, APKM.length, 29);
         e.urls.add(kind + ".apkm");
         return e;
     }
