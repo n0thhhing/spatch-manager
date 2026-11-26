@@ -1,9 +1,7 @@
 package spatch.manager;
 
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.app.AlertDialog;
-import android.app.ApplicationExitInfo;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -12,12 +10,10 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
-import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
@@ -34,14 +30,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,7 +45,8 @@ import java.util.concurrent.Executors;
  * and Changes (releases, display modes, and phone signing key).
  */
 public final class MainActivity extends Activity {
-    private static final String SPOTIFY = "com.spotify.music", NOTIFY = "notify_updates", INVITE = "source_invite", DOWNLOADED = "apkm_downloaded";
+    static final String SPOTIFY = "com.spotify.music", INVITE = "source_invite", DOWNLOADED = "apkm_downloaded";
+    private static final String NOTIFY = "notify_updates";
     private static final String PAGE = "page", CLONE_PKG = "clone_package", CLONE_NAME = "clone_name", CLONE_INSTALLED = "clone_installed:";
     static final String INSTALLED = "installed_bundle", NIGHTLY = "nightly_patches", BRANCH = "nightly_branch", UPDATE = "start_update";
     static final String TOKEN = "github_token";
@@ -64,15 +58,16 @@ public final class MainActivity extends Activity {
     private static final String[] HEADINGS = {"Spatch Manager", "Clones", "Diagnostics", "Changes"};
     private static final String[] LINES = {"Patched here, signed with this phone's key", "Second Spotifys with their own names", "What the phone and Spatch report", "What's new in each release"};
 
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final Handler main = new Handler(Looper.getMainLooper());
+    final ExecutorService worker = Executors.newSingleThreadExecutor();
+    final Handler main = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
-    private Keys keys;
-    private Releases releases;
-    private String releaseError, pendingTag, pendingKey, pendingDone;
+    Keys keys;
+    Releases releases;
+    String releaseError;
+    Install install;
+    private Diagnostics diagnostics;
+    private String pendingTag, pendingKey, pendingDone;
     private boolean busy, installingSelf, conflict, autoUpdate;
-    private volatile boolean replaceImport; // the chosen APKM was the wrong one and the user tapped Install again
-    private volatile boolean inheriting, inheritFailed; // an update replacing base.apk alone; a failed one goes back to all five
     private Look look;
     private LinearLayout statusCard, changesBox, clonesListBox, buildBox;
     private TextView buildTitle, buildMeta;
@@ -86,11 +81,8 @@ public final class MainActivity extends Activity {
     private TextView stateBadge;
     private TextView spotifyStatus, apkmStatus, patchStatus, whatsNew, keyStatus, managerStatus, status, cloneStatus;
     private Hero heading;
-    private TextView diagnosticsText, exitsText;
     private Button displayMode, choose, seeChanges, patch, uninstall, managerUpdate, check, refreshChanges, exportKey, importKey, invite;
     private Button cloneInstall, cloneIconPick, cloneIconReset;
-    private Button runDiagnosticsBtn, copyDiagnosticsBtn, refreshExitsBtn;
-    private Button openBatterySettingsBtn, openAppDetailsBtn, launchSpotifyBtn;
     private EditText clonePkg, cloneName;
     private android.widget.ImageView cloneIcon;
     private LinearLayout[] pages;
@@ -176,7 +168,7 @@ public final class MainActivity extends Activity {
             boolean cloning = !installingSelf && !INSTALLED.equals(pendingKey);
             if (!installingSelf) clearPending();
             if (code == PackageInstaller.STATUS_SUCCESS) {
-                inheritFailed = false;
+                install.inheritFailed = false;
                 if (!installingSelf && pendingTag != null) prefs.edit().putString(pendingKey, pendingTag).apply();
                 say(installingSelf ? "Spatch Manager is up to date." : pendingDone);
             } else if (code == PackageInstaller.STATUS_FAILURE_CONFLICT || code == PackageInstaller.STATUS_FAILURE_INCOMPATIBLE) {
@@ -187,8 +179,8 @@ public final class MainActivity extends Activity {
                     : "Spotify on this phone is signed with a different key. Uninstall it first (that removes its downloads), or import the key it was signed with.");
             } else if (code == PackageInstaller.STATUS_FAILURE_ABORTED) {
                 say("Install cancelled.");
-            } else if (inheriting && !installingSelf) {
-                inheritFailed = true;
+            } else if (install.inheriting && !installingSelf) {
+                install.inheritFailed = true;
                 say("The quick update didn't take (" + intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) + "). Tap again to reinstall all of Spatch.");
             } else {
                 say("Install failed: " + intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
@@ -239,6 +231,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE); // the page draws its own heading
         prefs = getSharedPreferences("manager", MODE_PRIVATE);
+        install = new Install(this, prefs, this::step);
         recoverPendingInstall();
         Releases.setToken(prefs.getString(TOKEN, null));
         look = new Look(this);
@@ -453,7 +446,8 @@ public final class MainActivity extends Activity {
         cloneLayout(pages[1]);
 
         // --- Page 2: Diagnostics ---
-        diagnosticsLayout(pages[2]);
+        diagnostics = new Diagnostics(this, look);
+        diagnostics.layout(pages[2]);
 
         // --- Page 3: Changes ---
         changesLayout(pages[3]);
@@ -689,218 +683,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void diagnosticsLayout(LinearLayout page) {
-        TextView note = look.text("Verify Spatch installation health, keystore signatures, split APK architecture, and inspect system crash reports.", 15, look.onSurfaceVariant, false);
-        note.setPadding(look.dp(8), look.dp(4), look.dp(8), 0);
-        page.addView(note);
-
-        LinearLayout testsCard = look.card(page, "Diagnostics & Self-Tests");
-        runDiagnosticsBtn = look.button("Run self-tests", "tune", Look.Kind.FILLED, v -> runDiagnostics());
-        copyDiagnosticsBtn = look.button("Copy report", "content_copy", Look.Kind.TONAL, v -> copyDiagnostics());
-        testsCard.addView(look.row(runDiagnosticsBtn, copyDiagnosticsBtn));
-        diagnosticsText = look.text("Tap 'Run self-tests' to verify signing keys, split packages, and system permissions.", 13, look.onSurfaceVariant, false);
-        diagnosticsText.setTypeface(android.graphics.Typeface.MONOSPACE);
-        diagnosticsText.setPadding(look.dp(12), look.dp(12), look.dp(12), look.dp(12));
-        diagnosticsText.setBackground(look.shape(look.containerHigh, 16, Look.blend(look.containerHigh, look.outline, 0.22f), 1f));
-        testsCard.addView(diagnosticsText, look.spaced(10));
-
-        LinearLayout exitsCard = look.card(page, "Spotify Process Exits & Crashes");
-        TextView exitsNote = look.text("OS-level historical process terminations from ActivityManager.", 14, look.onSurfaceVariant, false);
-        exitsCard.addView(exitsNote);
-        exitsText = look.text("Loading process history…", 13, look.onSurfaceVariant, false);
-        exitsText.setTypeface(android.graphics.Typeface.MONOSPACE);
-        exitsText.setPadding(look.dp(12), look.dp(12), look.dp(12), look.dp(12));
-        exitsText.setBackground(look.shape(look.containerHigh, 16, Look.blend(look.containerHigh, look.outline, 0.22f), 1f));
-        exitsCard.addView(exitsText, look.spaced(10));
-        refreshExitsBtn = look.button("Refresh crash history", "refresh", Look.Kind.TONAL, v -> updateExitReasons());
-        exitsCard.addView(refreshExitsBtn, look.spaced(10));
-
-        LinearLayout shortcutsCard = look.card(page, "System Settings & Shortcuts");
-        openBatterySettingsBtn = look.button("Battery whitelist", "tune", Look.Kind.TONAL, v -> {
-            try {
-                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-            } catch (Exception e) {
-                say("Settings unavailable.");
-            }
-        });
-        openAppDetailsBtn = look.button("Spotify details", "open_in_new", Look.Kind.TONAL, v -> {
-            try {
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + SPOTIFY)));
-            } catch (Exception e) {
-                say("App details unavailable.");
-            }
-        });
-        launchSpotifyBtn = look.button("Launch Spotify", "music_note", Look.Kind.TONAL, v -> {
-            Intent i = getPackageManager().getLaunchIntentForPackage(SPOTIFY);
-            if (i != null) startActivity(i);
-            else say("Spotify isn't installed.");
-        });
-        shortcutsCard.addView(look.row(openBatterySettingsBtn, openAppDetailsBtn));
-        shortcutsCard.addView(launchSpotifyBtn, look.spaced(8));
-    }
-
-    private void runDiagnostics() {
-        diagnosticsText.setText("Running self-tests…");
-        worker.execute(() -> {
-            StringBuilder sb = new StringBuilder();
-            int pass = 0, warn = 0, fail = 0;
-
-            if (keys != null) {
-                pass++;
-                sb.append("PASS Phone Signing Keystore\n");
-                try {
-                    sb.append("     Fingerprint: ").append(keys.fingerprint().substring(0, 32)).append("\n");
-                } catch (Exception e) {
-                    sb.append("     Fingerprint: unreadable\n");
-                }
-            } else {
-                fail++;
-                sb.append("FAIL Phone Signing Keystore: missing or unreadable\n");
-            }
-
-            PackageInfo info = spotify();
-            if (info != null) {
-                boolean ours = keys != null && signedByUs(info);
-                if (ours) {
-                    pass++;
-                    sb.append("PASS Spotify Signature Match\n");
-                    sb.append("     Installed: Spotify ").append(info.versionName).append(" (signed with phone key)\n");
-                } else {
-                    warn++;
-                    sb.append("WARN Spotify Signature Mismatch\n");
-                    sb.append("     Installed with different key; import earlier key or reinstall to update\n");
-                }
-                if (info.applicationInfo != null && info.applicationInfo.splitNames != null && info.applicationInfo.splitNames.length > 0) {
-                    pass++;
-                    sb.append("PASS Split APK Architecture\n");
-                    sb.append("     ").append(info.applicationInfo.splitNames.length).append(" splits installed: ").append(String.join(", ", info.applicationInfo.splitNames)).append("\n");
-                } else {
-                    warn++;
-                    sb.append("WARN No Split APKs detected (monolithic base)\n");
-                }
-            } else {
-                sb.append("INFO Spotify is not currently installed\n");
-            }
-
-            File base = originalBase();
-            if (base.isFile()) {
-                pass++;
-                sb.append("PASS Preserved Original base.apk\n");
-                sb.append("     ").append(base.length() / (1 << 20)).append(" MB cached for fast updates\n");
-            } else {
-                sb.append("INFO Original base.apk not cached yet\n");
-            }
-
-            File apkm = apkm();
-            if (apkm.isFile()) {
-                pass++;
-                sb.append("PASS Spotify APKM Saved\n");
-                sb.append("     ").append(apkm.length() / (1 << 20)).append(" MB available\n");
-            } else {
-                sb.append("INFO No APKM cached on device\n");
-            }
-
-            if (getPackageManager().canRequestPackageInstalls()) {
-                pass++;
-                sb.append("PASS App Install Permission: Allowed\n");
-            } else {
-                fail++;
-                sb.append("FAIL App Install Permission: Not granted\n");
-            }
-
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                pass++;
-                sb.append("PASS Battery Optimization: Unrestricted (background checks active)\n");
-            } else {
-                warn++;
-                sb.append("WARN Battery Optimization: Optimized (Android may delay background checks)\n");
-            }
-
-            if (Build.VERSION.SDK_INT >= 33) {
-                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) {
-                    pass++;
-                    sb.append("PASS Notifications: Granted\n");
-                } else {
-                    warn++;
-                    sb.append("WARN Notifications: Not granted\n");
-                }
-            }
-
-            if (releases != null && releases.bundle != null) {
-                pass++;
-                sb.append("PASS Releases API: Connected\n");
-                sb.append("     Latest version: ").append(Releases.version(releases.bundle)).append("\n");
-            } else if (releaseError != null) {
-                warn++;
-                sb.append("WARN Releases API: ").append(releaseError).append("\n");
-            }
-
-            sb.append("\nResults: ").append(pass).append(" passed, ").append(warn).append(" warnings, ").append(fail).append(" failed");
-            String resultText = sb.toString();
-            main.post(() -> {
-                if (diagnosticsText != null) diagnosticsText.setText(look.verdicts(resultText));
-            });
-        });
-    }
-
-    private void copyDiagnostics() {
-        android.content.ClipboardManager clips = getSystemService(android.content.ClipboardManager.class);
-        if (clips != null && diagnosticsText != null) {
-            clips.setPrimaryClip(android.content.ClipData.newPlainText("Spatch Diagnostics", diagnosticsText.getText()));
-            say("Diagnostics report copied to clipboard.");
-        }
-    }
-
-    private void updateExitReasons() {
-        if (Build.VERSION.SDK_INT < 30) {
-            if (exitsText != null) exitsText.setText("Historical process exit monitoring requires Android 11+ (API 30).");
-            return;
-        }
-        try {
-            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) {
-                if (exitsText != null) exitsText.setText("ActivityManager is not available.");
-                return;
-            }
-            List<ApplicationExitInfo> exits = am.getHistoricalProcessExitReasons(SPOTIFY, 0, 8);
-            if (exits == null || exits.isEmpty()) {
-                if (exitsText != null) exitsText.setText("No process exits or crashes recorded by the OS for Spotify.");
-                return;
-            }
-            StringBuilder sb = new StringBuilder();
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
-            for (ApplicationExitInfo exit : exits) {
-                String reasonStr;
-                switch (exit.getReason()) {
-                    case ApplicationExitInfo.REASON_CRASH: reasonStr = "CRASH (Java Exception)"; break;
-                    case ApplicationExitInfo.REASON_CRASH_NATIVE: reasonStr = "NATIVE CRASH (Signal)"; break;
-                    case ApplicationExitInfo.REASON_ANR: reasonStr = "ANR (Freeze / Not Responding)"; break;
-                    case ApplicationExitInfo.REASON_LOW_MEMORY: reasonStr = "LOW MEMORY (LMK)"; break;
-                    case ApplicationExitInfo.REASON_USER_REQUESTED: reasonStr = "USER REQUESTED (Force stop / Swiped)"; break;
-                    case ApplicationExitInfo.REASON_EXIT_SELF: reasonStr = "EXIT SELF (Clean exit)"; break;
-                    default: reasonStr = "REASON #" + exit.getReason(); break;
-                }
-                sb.append("• ").append(sdf.format(new Date(exit.getTimestamp()))).append("\n");
-                sb.append("  ").append(reasonStr).append(" (PID ").append(exit.getPid()).append(")\n");
-                String desc = exit.getDescription();
-                if (desc != null && !desc.trim().isEmpty()) {
-                    sb.append("  ").append(desc.trim()).append("\n");
-                }
-                sb.append("\n");
-            }
-            if (exitsText != null) exitsText.setText(sb.toString().trim());
-        } catch (SecurityException e) {
-            if (exitsText != null) {
-                exitsText.setText("Cross-app exit history requires android.permission.DUMP.\n\n"
-                    + "To grant via ADB:\n"
-                    + "adb shell pm grant spatch.manager android.permission.DUMP");
-            }
-        } catch (Exception e) {
-            if (exitsText != null) exitsText.setText("Couldn't read exit history: " + e.getMessage());
-        }
-    }
-
     private void changesLayout(LinearLayout page) {
         TextView note = look.text("Recent commits in Nightly and release notes from published Spatch updates.", 15, look.onSurfaceVariant, false);
         note.setPadding(look.dp(8), look.dp(4), look.dp(8), 0);
@@ -1052,11 +834,7 @@ public final class MainActivity extends Activity {
     }
 
     private PackageInfo installed(String pkg) {
-        try {
-            return getPackageManager().getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES);
-        } catch (PackageManager.NameNotFoundException e) {
-            return null;
-        }
+        return install.installed(pkg);
     }
 
     /** Puts every label and button in line with the current state. */
@@ -1068,10 +846,10 @@ public final class MainActivity extends Activity {
         spotifyStatus.setText(info == null ? "Spotify isn't installed."
             : ours ? "Spatch is installed" + (installed != null ? ": patches " + shownPatches(installed) : "") + ". Spotify " + info.versionName + "."
             : "Spotify " + info.versionName + " is installed with another key. To install over it, import the key it was signed with (Signing key, Import key); otherwise it has to be uninstalled first.");
-        File apkm = apkm();
-        Sources.Invite source = invite();
+        File apkm = install.apkm();
+        Sources.Invite source = install.invite();
         apkmStatus.setText(apkm.isFile() ? (prefs.getBoolean(DOWNLOADED, false) ? "Spotify downloaded (" : "APKM saved (") + apkm.length() / (1 << 20) + " MB)."
-            : originalBase().isFile() ? "The original Spotify is kept, so no APKM is needed."
+            : install.originalBase().isFile() ? "The original Spotify is kept, so no APKM is needed."
             : source != null ? "Spotify downloads from " + source.host() + " when you install."
             : info != null && !ours ? "No APKM needed if the installed Spotify is the unmodified version Spatch supports."
             : "Choose the Spotify APKM that Spatch supports, or add an invite to a Spatch source.");
@@ -1107,7 +885,7 @@ public final class MainActivity extends Activity {
             ? " (" + (mgrUpdate.tag.startsWith("nightly-") ? Releases.version(mgrUpdate) : "version " + Releases.version(mgrUpdate)) + " is available)."
             : " is up to date."));
         managerUpdate.setVisibility(mgrUpdate != null ? View.VISIBLE : View.GONE);
-        for (Button b : Arrays.asList(displayMode, choose, seeChanges, managerUpdate, check, refreshChanges, importKey, invite, cloneIconPick, cloneIconReset, runDiagnosticsBtn, copyDiagnosticsBtn, refreshExitsBtn)) {
+        for (Button b : Arrays.asList(displayMode, choose, seeChanges, managerUpdate, check, refreshChanges, importKey, invite, cloneIconPick, cloneIconReset, diagnostics.runDiagnosticsBtn, diagnostics.copyDiagnosticsBtn, diagnostics.refreshExitsBtn)) {
             if (b != null) look.enable(b, !busy);
         }
         look.enable(exportKey, !busy && keys != null);
@@ -1191,9 +969,9 @@ public final class MainActivity extends Activity {
                 try (InputStream in = getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(tmp)) {
                     Bundle.copy(in, out);
                 }
-                if (!tmp.renameTo(apkm())) throw new java.io.IOException("Couldn't save the APKM.");
+                if (!tmp.renameTo(install.apkm())) throw new java.io.IOException("Couldn't save the APKM.");
                 prefs.edit().putBoolean(DOWNLOADED, false).apply();
-                replaceImport = false;
+                install.replaceImport = false;
                 done("APKM saved. It's checked when you install.");
             });
         } else if (request == EXPORT_KEY) {
@@ -1238,27 +1016,7 @@ public final class MainActivity extends Activity {
         final String tag = release.tag;
         conflict = false;
         work("Getting the patches", () -> {
-            File bundle = new File(getCacheDir(), tag + ".zip");
-            File dir = new File(getCacheDir(), "build"), signedDir = new File(dir, "signed");
-            List<File> unsigned;
-            try (Bundle b = Releases.openBundle(release.url, release.size, bundle, this::step)) {
-                File[] old = getCacheDir().listFiles((parent, name) -> name.endsWith(".zip") && !name.equals(bundle.getName()));
-                if (old != null) for (File f : old) f.delete();
-                delete(dir);
-                signedDir.mkdirs();
-                if (clone != null && !b.clonable()) throw new java.io.IOException("These patches can't make a clone yet; clones need patches from Spatch 0.8.1 or later.");
-                inheriting = clone == null && keepsSplits(b);
-                File input = input(b);
-                unsigned = input != null ? b.apply(input, dir, inheriting, clone, this::step) : fromInstalled(b, dir, inheriting, clone);
-            }
-            List<File> signed = new ArrayList<>();
-            for (int i = 0; i < unsigned.size(); i++) {
-                File in = unsigned.get(i), out = new File(signedDir, in.getName());
-                step("Signing " + in.getName(), i, unsigned.size());
-                keys.sign(in, out);
-                in.delete();
-                signed.add(out);
-            }
+            List<File> signed = install.build(release, clone, keys);
             step("Installing", 1, 1);
             String key = clone == null ? INSTALLED : CLONE_INSTALLED + clone.pkg;
             prefs.edit().putString(PENDING_KEY, key).putString(PENDING_TAG, tag).putLong(PENDING_AT, System.currentTimeMillis()).commit();
@@ -1268,49 +1026,8 @@ public final class MainActivity extends Activity {
                 pendingDone = clone == null ? "Spatch is installed. Open Spotify to use it." : clone.label + " is installed. Find it in your apps.";
                 installingSelf = false;
             });
-            Installer.install(this, signed, inheriting ? SPOTIFY : null);
+            Installer.install(this, signed, install.inheriting ? SPOTIFY : null);
         }, true);
-    }
-
-    /**
-     * The APKM to patch, or null to patch the installed Spotify instead. In order: a saved APKM
-     * that matches the bundle, an unmodified installed Spotify of the right version (or its kept
-     * original), then a download from the invite's source. A chosen APKM that doesn't match is never
-     * replaced silently: the first tap explains, a second one downloads over it.
-     */
-    private File input(spatch.manager.Bundle b) throws Exception {
-        File saved = apkm();
-        Sources.Invite source = invite();
-        if (saved.isFile()) {
-            step("Checking the saved APKM", 0, 1);
-            if (spatch.manager.Bundle.sha256(saved).equals(b.apkmSha)) return saved;
-            if (!prefs.getBoolean(DOWNLOADED, false) && !replaceImport) {
-                if (source == null) throw new java.io.IOException("The APKM you chose isn't the Spotify " + b.spotify + " one these patches need. Choose that one.");
-                replaceImport = true;
-                throw new java.io.IOException("The APKM you chose isn't the Spotify " + b.spotify + " one these patches need. Tap Install again to download the right one from " + source.host() + " instead.");
-            }
-        }
-        if (installedOriginal(b)) return null;
-        if (source == null) throw new java.io.IOException("Choose the Spotify " + b.spotify + " APKM, or add an invite to a Spatch source.");
-        step("Asking " + source.host() + " for Spotify " + b.spotify, 0, 1);
-        Sources.Entry entry = Sources.find(source, b);
-        Sources.download(source, entry, saved, this::step);
-        prefs.edit().putBoolean(DOWNLOADED, true).commit();
-        replaceImport = false;
-        return saved;
-    }
-
-    /** The installed Spotify is the right version and its original base.apk is at hand, kept or still installed. */
-    private boolean installedOriginal(spatch.manager.Bundle b) throws java.io.IOException {
-        PackageInfo info = spotify();
-        if (info == null || info.getLongVersionCode() != b.spotifyCode) return false;
-        if (originalBase().isFile()) return true;
-        step("Checking the installed Spotify", 0, 1);
-        return spatch.manager.Bundle.sha256(new File(info.applicationInfo.sourceDir)).equals(b.baseSha());
-    }
-
-    private Sources.Invite invite() {
-        return Sources.parse(prefs.getString(INVITE, null));
     }
 
     /** An invite shared to the manager (long-press the link, Share, Spatch Manager) is saved as it is. */
@@ -1342,48 +1059,13 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 prefs.edit().putString(INVITE, val).apply();
-                say("Invite saved. Install Spatch downloads Spotify from " + invite().host() + " when it needs to.");
+                say("Invite saved. Install Spatch downloads Spotify from " + install.invite().host() + " when it needs to.");
                 refresh();
             }, current == null ? null : () -> {
                 prefs.edit().remove(INVITE).apply();
                 say("Invite removed.");
                 refresh();
             });
-    }
-
-    /** Our own Spatch of the same Spotify version is installed, so its splits (never patched) can stay. */
-    private boolean keepsSplits(spatch.manager.Bundle b) {
-        PackageInfo info = spotify();
-        return !inheritFailed && info != null && keys != null && signedByUs(info) && info.getLongVersionCode() == b.spotifyCode
-            && info.applicationInfo.splitNames != null && info.applicationInfo.splitNames.length > 0;
-    }
-
-    /**
-     * No APKM: the original base.apk kept from an earlier install, or else the installed Spotify's
-     * own when it is still unmodified; the splits always come from the installed Spotify.
-     */
-    private List<File> fromInstalled(spatch.manager.Bundle b, File dir, boolean baseOnly, Clone clone) throws Exception {
-        PackageInfo info = spotify();
-        if (info == null) throw new java.io.IOException("Choose the Spotify " + b.spotify + " APKM first.");
-        if (info.getLongVersionCode() != b.spotifyCode) {
-            throw new java.io.IOException("The Spotify on this phone is version " + info.versionName + ", and Spatch needs " + b.spotify + ". Choose the " + b.spotify + " APKM.");
-        }
-        File kept = originalBase();
-        if (!kept.isFile()) {
-            File base = new File(info.applicationInfo.sourceDir);
-            step("Checking the installed Spotify", 0, 1);
-            if (!spatch.manager.Bundle.sha256(base).equals(b.baseSha())) {
-                throw new java.io.IOException("The Spotify on this phone is already patched, so it has no original to patch. Choose the Spotify " + b.spotify + " APKM once; the manager keeps what it needs for later updates.");
-            }
-            File tmp = new File(getFilesDir(), "original-base.apk.part");
-            try (InputStream in = new java.io.FileInputStream(base); OutputStream out = new FileOutputStream(tmp)) {
-                spatch.manager.Bundle.copy(in, out);
-            }
-            if (!tmp.renameTo(kept)) throw new java.io.IOException("Couldn't keep the original Spotify.");
-        }
-        List<File> splits = new ArrayList<>();
-        if (!baseOnly && info.applicationInfo.splitSourceDirs != null) for (String path : info.applicationInfo.splitSourceDirs) splits.add(new File(path));
-        return b.apply(kept, splits, dir, clone, this::step);
     }
 
     private Releases.Release managerUpdateTarget() {
@@ -1500,19 +1182,12 @@ public final class MainActivity extends Activity {
         dialog.show();
     }
 
-    private PackageInfo spotify() {
+    PackageInfo spotify() {
         return installed(SPOTIFY);
     }
 
-    private boolean signedByUs(PackageInfo info) {
-        try {
-            if (info.signingInfo == null) return false;
-            byte[] ours = keys.cert.getEncoded();
-            for (Signature s : info.signingInfo.getApkContentsSigners()) if (Arrays.equals(s.toByteArray(), ours)) return true;
-        } catch (Exception ignored) {
-            // unreadable certificate: treat as someone else's
-        }
-        return false;
+    boolean signedByUs(PackageInfo info) {
+        return Install.signedByUs(info, keys);
     }
 
     private String ownName() {
@@ -1538,22 +1213,13 @@ public final class MainActivity extends Activity {
         return installed.replaceFirst("^(patches-v|bundle-)", "");
     }
 
-    private File apkm() {
-        return new File(getFilesDir(), "spotify.apkm");
-    }
-
-    /** The unmodified base.apk, kept so updates need neither an APKM nor a stock install. */
-    private File originalBase() {
-        return new File(getFilesDir(), "original-base.apk");
-    }
-
-    private static void delete(File f) {
+    static void delete(File f) {
         File[] children = f.listFiles();
         if (children != null) for (File c : children) delete(c);
         f.delete();
     }
 
-    private void say(String message) {
+    void say(String message) {
         status.setText(message);
         statusCard.setVisibility(message.isEmpty() && progress.getVisibility() != View.VISIBLE ? View.GONE : View.VISIBLE);
     }
