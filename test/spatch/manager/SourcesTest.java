@@ -90,6 +90,21 @@ public final class SourcesTest {
             check(cleaned.contains("• Clone support") && cleaned.contains("• Fix MiniArt") && !cleaned.contains("`") && !cleaned.contains("**"), "release markdown is cleaned for display");
             check(Releases.summary(cleaned).equals("New in 0.9.1"), "summary extracts the first line");
             check(Releases.version(new Releases.Release("nightly-5cf42ba", "u", "")).equals("nightly 5cf42ba") && Releases.code(new Releases.Release("manager-v0.9.1", "u", "")) == 901, "release version and manager code");
+
+            File mgr = new File(dir, "manager.apk");
+            Releases.download(base + "chunked-asset.apk", validBundle.length, mgr, (w, d, t) -> {}, "Downloading");
+            check(java.util.Arrays.equals(Files.readAllBytes(mgr.toPath()), validBundle), "chunked download matching asset size succeeds");
+            try {
+                Releases.download(base + "chunked-asset.apk", validBundle.length + 1, mgr, (w, d, t) -> {}, "Downloading");
+                check(false, "chunked download with wrong asset size fails");
+            } catch (IOException expected) {
+                check("The download has the wrong size.".equals(expected.getMessage()), "chunked download with wrong asset size fails (" + expected.getMessage() + ")");
+            }
+
+            StringBuilder maxPkg = new StringBuilder("com.spotify.");
+            while (maxPkg.length() < 127) maxPkg.append('a');
+            check(Clone.problem(maxPkg.toString()) == null, "127-character clone package name is accepted");
+            check(Clone.problem(maxPkg.toString() + "a") != null, "128-character clone package name is rejected");
         } finally {
             server.stop(0);
         }
@@ -143,6 +158,10 @@ public final class SourcesTest {
 
     private static void serve(HttpExchange x) throws IOException {
         String path = x.getRequestURI().getPath(), auth = x.getRequestHeaders().getFirst("Authorization");
+        if (path.equals("/chunked-asset.apk")) {
+            reply(x, 200, validBundle, 0);
+            return;
+        }
         if (path.equals("/bundle.zip") || path.equals("/bad.zip")) {
             bundleDownloads++;
             byte[] body = path.equals("/bundle.zip") ? validBundle : new byte[] {1, 2, 3};

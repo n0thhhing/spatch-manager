@@ -40,7 +40,7 @@ final class Clone {
     static String problem(String pkg) {
         if (pkg == null || !pkg.matches("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+")) return "Use dots between parts, each starting with a letter, like com.spotify.music.two.";
         if (pkg.equals(ORIGINAL)) return "That's Spotify's own name; a clone needs a different one.";
-        if (pkg.length() > 200) return "That name is too long.";
+        if (pkg.length() > 127) return "That name is too long.";
         return null;
     }
 

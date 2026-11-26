@@ -83,11 +83,16 @@ final class Keys {
     }
 
     void save(File dir) throws IOException, GeneralSecurityException {
-        File tmp = new File(dir, FILE + ".new");
+        File current = new File(dir, FILE), tmp = new File(dir, FILE + ".new");
         try (OutputStream out = new FileOutputStream(tmp)) {
             write(out, INTERNAL);
         }
-        if (!tmp.renameTo(new File(dir, FILE))) throw new IOException("Couldn't save the signing key.");
+        // A copy, not a move: if the rename below failed with the old key already moved away, the next start would
+        // find no key and quietly make a new one, and every install signed with the old key could no longer update.
+        if (current.isFile()) {
+            java.nio.file.Files.copy(current.toPath(), new File(dir, FILE + ".prev").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        if (!tmp.renameTo(current)) throw new IOException("Couldn't save the signing key.");
     }
 
     String fingerprint() throws GeneralSecurityException {

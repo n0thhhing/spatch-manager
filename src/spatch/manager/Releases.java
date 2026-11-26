@@ -27,13 +27,19 @@ final class Releases {
     /** A release's tag, the download URL of its asset, and its release notes. */
     static final class Release {
         final String tag, url, notes;
+        final long size;
         /** A nightly's commit (seven digits); its tag is a fingerprint of the patch sources, which users read as a commit. */
         String commit;
 
         Release(String tag, String url, String notes) {
+            this(tag, url, notes, 0);
+        }
+
+        Release(String tag, String url, String notes, long size) {
             this.tag = tag;
             this.url = url;
             this.notes = notes == null ? "" : notes;
+            this.size = size;
         }
     }
 
@@ -154,20 +160,16 @@ final class Releases {
                     r.branches.add(tag.substring("branch-".length()));
                 if (tag.equals(nightlyTag) && release.optBoolean("prerelease") && !release.optBoolean("draft")) {
                     String commit = release.optString("target_commitish", "");
-                    String url = asset(release, "spatch-bundle.zip");
-                    if (commit.length() >= 7 && url != null) {
-                        r.nightly = new Release(nightlyIdentity(release, "spatch-bundle.zip", commit), url, body);
+                    JSONObject bundleAsset = asset(release, "spatch-bundle.zip");
+                    if (commit.length() >= 7 && bundleAsset != null) {
+                        r.nightly = release(nightlyIdentity(release, "spatch-bundle.zip", commit), bundleAsset, body);
                         r.nightly.commit = commit.substring(0, 7);
                     }
-                    String mgr = asset(release, "spatch-manager.apk");
-                    if (commit.length() >= 7 && mgr != null) r.nightlyManager = new Release(nightlyIdentity(release, "spatch-manager.apk", commit), mgr, body);
                     continue;
                 }
                 if (release.optBoolean("draft") || release.optBoolean("prerelease")) continue;
-                if (r.bundle == null && (tag.startsWith("patches-v") || tag.startsWith("bundle-"))) r.bundle = new Release(tag, asset(release, "spatch-bundle.zip"), body);
-                if (r.manager == null && tag.startsWith("manager-v")) r.manager = new Release(tag, asset(release, "spatch-manager.apk"), body);
-                if (r.bundle != null && r.bundle.url == null) r.bundle = null;
-                if (r.manager != null && r.manager.url == null) r.manager = null;
+                if (r.bundle == null && (tag.startsWith("patches-v") || tag.startsWith("bundle-"))) r.bundle = release(tag, asset(release, "spatch-bundle.zip"), body);
+                if (r.manager == null && tag.startsWith("manager-v")) r.manager = release(tag, asset(release, "spatch-manager.apk"), body);
                 if (!body.isEmpty() && r.notes.size() < 12) {
                     String title = release.optString("name", "").trim();
                     String published = release.optString("published_at", "");
@@ -257,17 +259,25 @@ final class Releases {
         return dash >= 0 ? r.tag.substring(dash + 2) : r.tag;
     }
 
-    /** The download URL of the release's asset with that name, or null. */
-    private static String asset(JSONObject release, String name) throws JSONException {
+    /** The release's asset object with that name, or null. */
+    private static JSONObject asset(JSONObject release, String name) throws JSONException {
         JSONArray assets = release.getJSONArray("assets");
         for (int i = 0; i < assets.length(); i++) {
             JSONObject a = assets.getJSONObject(i);
-            if (a.getString("name").equals(name)) return a.getString("browser_download_url");
+            if (a.getString("name").equals(name)) return a;
         }
         return null;
     }
 
+    private static Release release(String tag, JSONObject asset, String body) throws JSONException {
+        return asset == null ? null : new Release(tag, asset.getString("browser_download_url"), body, asset.optLong("size", 0));
+    }
+
     static Bundle openBundle(String url, File cached, Bundle.Progress progress) throws IOException {
+        return openBundle(url, 0, cached, progress);
+    }
+
+    static Bundle openBundle(String url, long expectedSize, File cached, Bundle.Progress progress) throws IOException {
         if (cached.isFile()) {
             try {
                 return new Bundle(cached);
@@ -275,7 +285,7 @@ final class Releases {
                 Files.delete(cached.toPath());
             }
         }
-        download(url, cached, progress, "Downloading the patches");
+        download(url, expectedSize, cached, progress, "Downloading the patches");
         try {
             return new Bundle(cached);
         } catch (IOException damaged) {
@@ -289,11 +299,16 @@ final class Releases {
     }
 
     static void download(String url, File to, Bundle.Progress progress, String what) throws IOException {
+        download(url, 0, to, progress, what);
+    }
+
+    static void download(String url, long expectedSize, File to, Bundle.Progress progress, String what) throws IOException {
         HttpURLConnection c = open(url, "application/octet-stream");
         File tmp = new File(to.getPath() + ".part");
         try {
             try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(tmp)) {
                 long total = c.getContentLengthLong(), done = 0;
+                if (total < 0 && expectedSize > 0) total = expectedSize;
                 byte[] buf = new byte[1 << 16];
                 for (int n; (n = in.read(buf)) > 0;) {
                     out.write(buf, 0, n);
@@ -337,16 +352,15 @@ final class Releases {
             String body = cleanBody(release.optString("body", ""));
             if (tag.equals("nightly-manager") && release.optBoolean("prerelease")) {
                 String commit = release.optString("target_commitish", "");
-                String mgr = asset(release, "spatch-manager.apk");
+                JSONObject mgr = asset(release, "spatch-manager.apk");
                 if (commit.length() >= 7 && mgr != null && r.nightlyManager == null) {
-                    r.nightlyManager = new Release(nightlyIdentity(release, "spatch-manager.apk", commit), mgr, body);
+                    r.nightlyManager = release(nightlyIdentity(release, "spatch-manager.apk", commit), mgr, body);
                 }
                 continue;
             }
             if (release.optBoolean("prerelease")) continue;
             if (r.manager == null && tag.startsWith("manager-v")) {
-                String mgr = asset(release, "spatch-manager.apk");
-                if (mgr != null) r.manager = new Release(tag, mgr, body);
+                r.manager = release(tag, asset(release, "spatch-manager.apk"), body);
             }
         }
     }

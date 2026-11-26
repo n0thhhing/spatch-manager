@@ -22,11 +22,24 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Run tests
+        run: |
+          if ! ls "$ANDROID_HOME"/platforms/android-*/android.jar >/dev/null 2>&1; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" > /dev/null
+          fi
+          jar=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -1)
+          d=$(mktemp -d)
+          javac -nowarn -d "$d" -cp "$jar" src/spatch/manager/{Bundle,Clone,Releases,Sources}.java test/spatch/manager/SourcesTest.java
+          java -cp "$d:$jar" spatch.manager.SourcesTest
       - name: Build Manager APK
         env:
           MANAGER_KEYSTORE: ${{ secrets.MANAGER_KEYSTORE }}
           MANAGER_KS_PASS: ${{ secrets.MANAGER_KS_PASS }}
         run: |
+          if [ -z "${MANAGER_KEYSTORE:-}" ] || [ -z "${MANAGER_KS_PASS:-}" ]; then
+            echo "MANAGER_KEYSTORE / MANAGER_KS_PASS secrets not set; skipping build and publish"
+            exit 0
+          fi
           if [ ! -x "$ANDROID_HOME/build-tools/36.0.0/aapt2" ]; then
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0" > /dev/null
           fi
@@ -35,20 +48,19 @@ jobs:
           fi
           mkdir -p out
           ver="$(cat VERSION)-${GITHUB_SHA::7}"
-          if [ -n "${MANAGER_KEYSTORE:-}" ] && [ -n "${MANAGER_KS_PASS:-}" ]; then
-            printf '%s' "$MANAGER_KEYSTORE" | base64 -d > "$RUNNER_TEMP/manager.p12"
-            ./build.sh "$ver" out/spatch-manager.apk --keystore "$RUNNER_TEMP/manager.p12" --alias "${MANAGER_KS_ALIAS:-spatch-test}" --ks-pass-env MANAGER_KS_PASS
-          else
-            echo "MANAGER_KEYSTORE / MANAGER_KS_PASS secrets not set; skipping signed APK publish"
-            ./build.sh "$ver" out/spatch-manager.apk
-          fi
+          printf '%s' "$MANAGER_KEYSTORE" | base64 -d > "$RUNNER_TEMP/manager.p12"
+          ./build.sh "$ver" out/spatch-manager.apk --keystore "$RUNNER_TEMP/manager.p12" --alias "${MANAGER_KS_ALIAS:-spatch-test}" --ks-pass-env MANAGER_KS_PASS
       - name: Publish nightly release
-        if: env.MANAGER_KEYSTORE != '' || secrets.MANAGER_KEYSTORE != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release upload nightly out/spatch-manager.apk --clobber
-          else
-            gh release create nightly out/spatch-manager.apk --prerelease --title "Nightly" --notes "Automated nightly build of Spatch Manager (${GITHUB_SHA::7})."
+          if [ ! -f out/spatch-manager.apk ]; then
+            echo "No built APK; skipping publish"
+            exit 0
           fi
+          if gh release view nightly-manager >/dev/null 2>&1; then
+            gh release edit nightly-manager --target "$GITHUB_SHA"
+          else
+            gh release create nightly-manager --prerelease --target "$GITHUB_SHA" --title "Nightly Manager" --notes "Automated nightly build of Spatch Manager (${GITHUB_SHA::7})."
+          fi
+          gh release upload nightly-manager "out/spatch-manager.apk#nightly-$GITHUB_SHA" --clobber

@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
     static final String INSTALLED = "installed_bundle", NIGHTLY = "nightly_patches", BRANCH = "nightly_branch", UPDATE = "start_update";
     static final String TOKEN = "github_token";
     private static final String CLONES_SET = "clones_packages";
+    private static final String PENDING_KEY = "pending_install_key", PENDING_TAG = "pending_install_tag", PENDING_AT = "pending_install_at";
     private static final int PICK_APKM = 1, EXPORT_KEY = 2, IMPORT_KEY = 3, PICK_ICON = 4;
     private static final String[] PAGES = {"Spatch", "Clones", "Diagnostics", "Changes"};
     private static final String[] PAGE_ICONS = {"music_note", "content_copy", "stethoscope", "system_update"};
@@ -173,6 +174,7 @@ public final class MainActivity extends Activity {
             stepTracker.setVisibility(View.GONE);
             delete(new File(getCacheDir(), "build"));
             boolean cloning = !installingSelf && !INSTALLED.equals(pendingKey);
+            if (!installingSelf) clearPending();
             if (code == PackageInstaller.STATUS_SUCCESS) {
                 inheritFailed = false;
                 if (!installingSelf && pendingTag != null) prefs.edit().putString(pendingKey, pendingTag).apply();
@@ -194,6 +196,21 @@ public final class MainActivity extends Activity {
             refresh();
         }
     };
+
+    private void clearPending() {
+        prefs.edit().remove(PENDING_KEY).remove(PENDING_TAG).remove(PENDING_AT).apply();
+    }
+
+    private void recoverPendingInstall() {
+        String key = prefs.getString(PENDING_KEY, null), tag = prefs.getString(PENDING_TAG, null);
+        long at = prefs.getLong(PENDING_AT, 0);
+        if (key == null || tag == null || at <= 0) return;
+        String pkg = INSTALLED.equals(key) ? SPOTIFY : key.startsWith(CLONE_INSTALLED) ? key.substring(CLONE_INSTALLED.length()) : null;
+        PackageInfo info = pkg == null ? null : installed(pkg);
+        if (info != null && info.lastUpdateTime > at) {
+            prefs.edit().putString(key, tag).remove(PENDING_KEY).remove(PENDING_TAG).remove(PENDING_AT).apply();
+        }
+    }
 
     @Override
     protected void attachBaseContext(android.content.Context context) {
@@ -222,6 +239,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE); // the page draws its own heading
         prefs = getSharedPreferences("manager", MODE_PRIVATE);
+        recoverPendingInstall();
         Releases.setToken(prefs.getString(TOKEN, null));
         look = new Look(this);
         getWindow().getDecorView().setBackgroundColor(look.surface);
@@ -1223,7 +1241,7 @@ public final class MainActivity extends Activity {
             File bundle = new File(getCacheDir(), tag + ".zip");
             File dir = new File(getCacheDir(), "build"), signedDir = new File(dir, "signed");
             List<File> unsigned;
-            try (Bundle b = Releases.openBundle(release.url, bundle, this::step)) {
+            try (Bundle b = Releases.openBundle(release.url, release.size, bundle, this::step)) {
                 File[] old = getCacheDir().listFiles((parent, name) -> name.endsWith(".zip") && !name.equals(bundle.getName()));
                 if (old != null) for (File f : old) f.delete();
                 delete(dir);
@@ -1242,9 +1260,11 @@ public final class MainActivity extends Activity {
                 signed.add(out);
             }
             step("Installing", 1, 1);
+            String key = clone == null ? INSTALLED : CLONE_INSTALLED + clone.pkg;
+            prefs.edit().putString(PENDING_KEY, key).putString(PENDING_TAG, tag).putLong(PENDING_AT, System.currentTimeMillis()).commit();
             main.post(() -> {
                 pendingTag = tag;
-                pendingKey = clone == null ? INSTALLED : CLONE_INSTALLED + clone.pkg;
+                pendingKey = key;
                 pendingDone = clone == null ? "Spatch is installed. Open Spotify to use it." : clone.label + " is installed. Find it in your apps.";
                 installingSelf = false;
             });
@@ -1384,7 +1404,7 @@ public final class MainActivity extends Activity {
         if (release == null) return;
         work("Downloading the manager", () -> {
             File apk = new File(getCacheDir(), "manager.apk");
-            Releases.download(release.url, apk, this::step, "Downloading the manager");
+            Releases.download(release.url, release.size, apk, this::step, "Downloading the manager");
             main.post(() -> installingSelf = true);
             Installer.install(this, java.util.Collections.singletonList(apk), null);
         }, true);
